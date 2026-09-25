@@ -896,35 +896,22 @@ impl SenderInner<SenderLink<Target>> {
         let payload = Bytes::new();
 
         match sender {
-            Some(sender) if !self.link.is_settled_on_send(&transfer) => {
-                let unsettled =
-                    UnsettledMessage::new(payload.clone(), None, message_format, sender);
-                self.link
-                    .send_unsettled_transfer(
-                        &self.outgoing,
-                        transfer,
-                        payload,
-                        delivery_tag,
-                        unsettled,
-                    )
-                    .await?;
+            Some(sender) => {
+                let unsettled = UnsettledMessage::new(payload, None, message_format, sender);
+                self.send_transfer_with_outcome(transfer, delivery_tag, unsettled)
+                    .await
             }
-            sender => {
-                let settled = self
-                    .link
+            None => {
+                self.link
                     .send_transfer_without_modifying_unsettled_map(
                         &self.outgoing,
                         transfer,
                         payload,
                     )
                     .await?;
-                if let (true, Some(sender)) = (settled, sender) {
-                    let _ = sender.send(Ok(None));
-                }
+                Ok(())
             }
         }
-
-        Ok(())
     }
 
     async fn resume(
@@ -957,24 +944,8 @@ impl SenderInner<SenderLink<Target>> {
             batchable: false,
         };
 
-        let payload = unsettled_message.payload.clone();
-        if self.link.is_settled_on_send(&transfer) {
-            self.link
-                .send_transfer_without_modifying_unsettled_map(&self.outgoing, transfer, payload)
-                .await?;
-            let _ = unsettled_message.settle();
-        } else {
-            self.link
-                .send_unsettled_transfer(
-                    &self.outgoing,
-                    transfer,
-                    payload,
-                    delivery_tag,
-                    unsettled_message,
-                )
-                .await?;
-        }
-        Ok(())
+        self.send_transfer_with_outcome(transfer, delivery_tag, unsettled_message)
+            .await
     }
 
     async fn restate_outcome(
@@ -1005,19 +976,9 @@ impl SenderInner<SenderLink<Target>> {
             batchable: false,
         };
 
-        if self.link.is_settled_on_send(&transfer) {
-            self.link
-                .send_transfer_without_modifying_unsettled_map(&self.outgoing, transfer, payload)
-                .await?;
-            let _ = sender.send(Ok(None));
-        } else {
-            let unsettled = UnsettledMessage::new(payload.clone(), None, message_format, sender);
-            self.link
-                .send_unsettled_transfer(&self.outgoing, transfer, payload, delivery_tag, unsettled)
-                .await?;
-        }
-
-        Ok(())
+        let unsettled = UnsettledMessage::new(payload, None, message_format, sender);
+        self.send_transfer_with_outcome(transfer, delivery_tag, unsettled)
+            .await
     }
 
     async fn resend(&mut self, unsettled_message: UnsettledMessage) -> Result<(), SendError> {
@@ -1032,24 +993,29 @@ impl SenderInner<SenderLink<Target>> {
             false,
         )?;
 
-        let payload = unsettled_message.payload.clone();
+        self.send_transfer_with_outcome(transfer, new_delivery_tag, unsettled_message)
+            .await
+    }
+
+    /// Sends a transfer and resolves `unsettled` with its outcome: at once when the transfer goes
+    /// out settled, otherwise when the peer settles it, through the unsettled map.
+    async fn send_transfer_with_outcome(
+        &self,
+        transfer: Transfer,
+        delivery_tag: DeliveryTag,
+        unsettled: UnsettledMessage,
+    ) -> Result<(), SendError> {
+        let payload = unsettled.payload.clone();
         if self.link.is_settled_on_send(&transfer) {
             self.link
                 .send_transfer_without_modifying_unsettled_map(&self.outgoing, transfer, payload)
                 .await?;
-            let _ = unsettled_message.settle();
+            let _ = unsettled.settle();
         } else {
             self.link
-                .send_unsettled_transfer(
-                    &self.outgoing,
-                    transfer,
-                    payload,
-                    new_delivery_tag,
-                    unsettled_message,
-                )
+                .send_unsettled_transfer(&self.outgoing, transfer, payload, delivery_tag, unsettled)
                 .await?;
         }
-
         Ok(())
     }
 
